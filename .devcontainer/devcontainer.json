@@ -1,9 +1,12 @@
 {
-  "name": "Devcontainer",
-  "image": "mcr.microsoft.com/devcontainers/python:3.8-bookworm",
+  "name": "tr-doc-processor",
+  "image": "python:3.11-slim",
+  "postCreateCommand": "python -m pip install -U pip",
   "customizations": {
     "vscode": {
-      "extensions": ["ms-python.python"]
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
     }
   }
 }
