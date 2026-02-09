@@ -305,8 +305,7 @@ def export_rows(db_path: str, output_path: str, fmt: str) -> None:
                 amount_in,
                 amount_out,
                 balance,
-                source_pdf,
-                txn_hash
+                source_pdf
             FROM transactions
             ORDER BY date, id
             """,
@@ -323,7 +322,6 @@ def export_rows(db_path: str, output_path: str, fmt: str) -> None:
         "amount_out",
         "balance",
         "source_pdf",
-        "txn_hash",
     ]
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)

@@ -1,6 +1,6 @@
 # Trade Republic Doc Processor (MVP)
 
-Parse Trade Republic PDF documents into a SQLite database and export transactions.
+Parse Trade Republic PDF documents into a SQLite database and export transactions (primary output: Excel).
 
 ## Setup
 
@@ -17,9 +17,9 @@ pip install -r requirements.txt
 ```
 
 The scanner looks for `Umsatzübersicht` sections and extracts transactions with the following fields:
-`date`, `type`, `isin`, `instrument_name`, `quantity`, `amount_in`, `amount_out`, `balance`, `source_pdf`, `txn_hash`.
+`date`, `type`, `isin`, `instrument_name`, `quantity`, `amount_in`, `amount_out`, `balance`, `source_pdf`.
 
-### Export to CSV or XLSX
+### Export to XLSX (primary) or CSV
 
 ```bash
 ./trimport export --format csv --out export.csv --db trade_republic.db
