@@ -1,16 +1,5 @@
-# Python bytecode
 __pycache__/
 *.pyc
-
-# pytest
 .pytest_cache/
-
-# exports / generated files
 exports/
-*.xlsx
-
-# local databases
 *.db
-
-# OS / tooling
-.DS_Store

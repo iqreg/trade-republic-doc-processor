@@ -8,6 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
+import json
 
 
 DATE_PATTERN = re.compile(r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b")
@@ -30,6 +31,15 @@ TYPE_MAP = {
     "transfer": "transfer",
     "handel": "trade",
 }
+
+HEADER_TOKENS = [
+    "DATUM",
+    "TYP",
+    "BESCHREIBUNG",
+    "ZAHLUNGSEINGANG",
+    "ZAHLUNGSAUSGANG",
+    "SALDO",
+]
 
 MONTH_MAP = {
     "jan": 1,
@@ -66,6 +76,8 @@ class ParseResult:
     transactions: List["ParsedTransaction"]
     section_found: bool
     page_texts: List[str]
+    extracted_lines: List[str]
+    header_hits: dict
 
 
 @dataclass
@@ -181,6 +193,35 @@ def build_txn_hash(parts: Sequence[Optional[str]]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def find_header_idx(lines: List[str]) -> Optional[int]:
+    for idx, line in enumerate(lines):
+        upper = line.upper()
+        if all(token in upper for token in HEADER_TOKENS):
+            return idx
+    return None
+
+
+def extract_transaction_lines_from_text(text: str) -> Tuple[List[str], bool]:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    header_idx = find_header_idx(lines)
+    if header_idx is None:
+        return [], False
+    return lines[header_idx + 1 :], True
+
+
+def parse_transaction_lines(lines: List[str], source_pdf: str) -> List[ParsedTransaction]:
+    transactions: List[ParsedTransaction] = []
+    buffer: List[str] = []
+    for line in lines:
+        buffer.append(line)
+        combined = " ".join(buffer)
+        parsed = parse_transaction_line(combined, source_pdf)
+        if parsed:
+            transactions.append(parsed)
+            buffer.clear()
+    return transactions
+
+
 def parse_transaction_line(line: str, source_pdf: str) -> Optional[ParsedTransaction]:
     date_iso, remainder = extract_date(line)
     if not date_iso:
@@ -282,71 +323,46 @@ def parse_transaction_line(line: str, source_pdf: str) -> Optional[ParsedTransac
     )
 
 
-def is_table_header(line: str) -> bool:
-    lower = line.lower()
-    return all(
-        token in lower
-        for token in (
-            "datum",
-            "typ",
-            "beschreibung",
-            "zahlungseingang",
-            "zahlungsausgang",
-            "saldo",
-        )
-    )
-
-
 def extract_transactions_from_text(text: str, source_pdf: str) -> Tuple[List[ParsedTransaction], bool]:
-    transactions: List[ParsedTransaction] = []
-    lines = text.splitlines()
-    section_found = any("umsatzübersicht" in line.lower() for line in lines)
-    in_table = False
-    buffer: List[str] = []
+    table_lines, header_found = extract_transaction_lines_from_text(text)
+    transactions = parse_transaction_lines(table_lines, source_pdf)
+    return transactions, header_found
 
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        lower = stripped.lower()
 
-        if "umsatzübersicht" in lower:
-            in_table = False
-            buffer.clear()
-            continue
+def extract_transaction_lines_from_pdf(pdf_path: str) -> Tuple[List[str], bool, List[str], dict]:
+    import pdfplumber
 
-        if is_table_header(stripped):
-            in_table = True
-            buffer.clear()
-            continue
+    all_lines: List[str] = []
+    page_texts: List[str] = []
+    header_found = False
+    header_hits = {"hit": [], "miss": []}
 
-        if not in_table:
-            continue
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_index, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text() or ""
+            page_texts.append(text)
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            header_idx = find_header_idx(lines)
+            if header_idx is None:
+                header_hits["miss"].append(page_index)
+                continue
+            header_found = True
+            header_hits["hit"].append(page_index)
+            all_lines.extend(lines[header_idx + 1 :])
 
-        buffer.append(stripped)
-        combined = " ".join(buffer)
-        parsed = parse_transaction_line(combined, source_pdf)
-        if parsed:
-            transactions.append(parsed)
-            buffer.clear()
-
-    return transactions, section_found
+    return all_lines, header_found, page_texts, header_hits
 
 
 def parse_pdf(pdf_path: str) -> ParseResult:
-    parsed: List[ParsedTransaction] = []
-    page_texts: List[str] = []
-    section_found = False
-    import pdfplumber
-
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            page_texts.append(text)
-            page_transactions, page_section_found = extract_transactions_from_text(text, pdf_path)
-            parsed.extend(page_transactions)
-            section_found = section_found or page_section_found
-    return ParseResult(transactions=parsed, section_found=section_found, page_texts=page_texts)
+    lines, header_found, page_texts, header_hits = extract_transaction_lines_from_pdf(pdf_path)
+    transactions = parse_transaction_lines(lines, pdf_path)
+    return ParseResult(
+        transactions=transactions,
+        section_found=header_found,
+        page_texts=page_texts,
+        extracted_lines=lines,
+        header_hits=header_hits,
+    )
 
 
 def compute_checksum(path: str) -> str:
@@ -413,14 +429,26 @@ def insert_transactions(db_path: str, document_id: int, transactions: Sequence[P
         return conn.total_changes
 
 
-def write_debug_dump(debug_dump: str, pdf_path: str, page_texts: Sequence[str]) -> None:
+def write_debug_dump(
+    debug_dump: str,
+    pdf_path: str,
+    page_texts: Sequence[str],
+    extracted_lines: Sequence[str],
+    header_hits: dict,
+) -> None:
     os.makedirs(debug_dump, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-    for index, text in enumerate(page_texts, start=1):
-        filename = f"{base_name}_page_{index}.txt"
-        output_path = os.path.join(debug_dump, filename)
-        with open(output_path, "w", encoding="utf-8") as handle:
-            handle.write(text)
+    pagecount_path = os.path.join(debug_dump, f"{base_name}.pagecount.txt")
+    with open(pagecount_path, "w", encoding="utf-8") as handle:
+        handle.write(str(len(page_texts)))
+
+    extracted_path = os.path.join(debug_dump, f"{base_name}.extracted.txt")
+    with open(extracted_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(extracted_lines))
+
+    header_hits_path = os.path.join(debug_dump, f"{base_name}.header_hits.json")
+    with open(header_hits_path, "w", encoding="utf-8") as handle:
+        json.dump(header_hits, handle, ensure_ascii=False, indent=2)
 
 
 def scan_folder(folder: str, db_path: str, debug_dump: Optional[str]) -> int:
@@ -435,7 +463,13 @@ def scan_folder(folder: str, db_path: str, debug_dump: Optional[str]) -> int:
             document_id = upsert_document(db_path, pdf_path, checksum)
             result = parse_pdf(pdf_path)
             if debug_dump:
-                write_debug_dump(debug_dump, pdf_path, result.page_texts)
+                write_debug_dump(
+                    debug_dump,
+                    pdf_path,
+                    result.page_texts,
+                    result.extracted_lines,
+                    result.header_hits,
+                )
             inserted_count = insert_transactions(db_path, document_id, result.transactions)
             inserted += inserted_count
             print(
@@ -443,10 +477,14 @@ def scan_folder(folder: str, db_path: str, debug_dump: Optional[str]) -> int:
                 f"inserted {inserted_count} new."
             )
             if len(result.transactions) == 0:
+                header_hits = result.header_hits
+                hits = len(header_hits.get("hit", []))
+                misses = len(header_hits.get("miss", []))
                 print(
-                    f"{pdf_path}: section 'Umsatzübersicht' found: "
+                    f"{pdf_path}: header found: "
                     f"{'yes' if result.section_found else 'no'}."
                 )
+                print(f"{pdf_path}: header hits {hits}, misses {misses}.")
     return inserted
 
 

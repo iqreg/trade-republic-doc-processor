@@ -1,13 +1,18 @@
 import sqlite3
+import sys
 from pathlib import Path
 
 import trimport
+
 from trimport import (
     ParseResult,
     extract_transactions_from_text,
+    extract_transaction_lines_from_pdf,
+    extract_transaction_lines_from_text,
     init_db,
     insert_transactions,
     parse_transaction_line,
+    parse_transaction_lines,
     scan_folder,
     upsert_document,
 )
@@ -26,7 +31,7 @@ def test_parse_transaction_line_buy():
 
 
 def test_extract_transactions_from_text_filters_section():
-    text = "Header\nUmsatzübersicht\nDATUM TYP BESCHREIBUNG ZAHLUNGSEINGANG ZAHLUNGSAUSGANG SALDO\n"
+    text = "Header\nDATUM TYP BESCHREIBUNG ZAHLUNGSEINGANG ZAHLUNGSAUSGANG SALDO\n"
     text += "01.03.2024 Verkauf Demo SE DE0009999999 5 2.000,00 0,00 7.000,00"
     txns, section_found = extract_transactions_from_text(text, "sample.pdf")
     assert section_found is True
@@ -37,9 +42,10 @@ def test_extract_transactions_from_text_filters_section():
 def test_fixture_parsing_layout():
     fixture_path = Path(__file__).parent / "fixtures" / "umsatz_sample.txt"
     text = fixture_path.read_text(encoding="utf-8")
-    txns, section_found = extract_transactions_from_text(text, "sample.pdf")
+    lines, header_found = extract_transaction_lines_from_text(text)
+    txns = parse_transaction_lines(lines, "sample.pdf")
 
-    assert section_found is True
+    assert header_found is True
     assert len(txns) >= 1
 
     first = txns[0]
@@ -49,6 +55,35 @@ def test_fixture_parsing_layout():
     assert first.quantity == 10.0
     assert first.amount_out == 1234.56
     assert first.balance == 5000.0
+
+
+def test_extract_lines_from_pdf(monkeypatch):
+    fixture_path = Path(__file__).parent / "fixtures" / "umsatz_sample.txt"
+    text = fixture_path.read_text(encoding="utf-8")
+
+    class FakePage:
+        def extract_text(self) -> str:
+            return text
+
+    class FakePdf:
+        pages = [FakePage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_open(path: str):
+        return FakePdf()
+
+    fake_module = type("FakeModule", (), {"open": fake_open})
+    monkeypatch.setitem(sys.modules, "pdfplumber", fake_module)
+
+    lines, header_found, _, _ = extract_transaction_lines_from_pdf("sample.pdf")
+    assert header_found is True
+    assert len(lines) > 0
+    assert any("Buy trade" in line or "Sell trade" in line for line in lines)
 
 
 def test_insert_transactions_deduplicates(tmp_path: Path):
@@ -74,12 +109,19 @@ def test_scan_writes_debug_dump_on_empty(tmp_path: Path, monkeypatch):
     pdf_path.write_bytes(b"%PDF-1.4\n%EOF")
 
     def fake_parse_pdf(path: str) -> ParseResult:
-        return ParseResult(transactions=[], section_found=False, page_texts=["page 1"])
+        return ParseResult(
+            transactions=[],
+            section_found=False,
+            page_texts=["page 1"],
+            extracted_lines=[],
+            header_hits={"hit": [], "miss": [1]},
+        )
 
     monkeypatch.setattr(trimport, "parse_pdf", fake_parse_pdf)
 
     debug_dump = tmp_path / "dump"
     scan_folder(str(tmp_path), str(tmp_path / "test.db"), str(debug_dump))
 
-    dumped_files = list(debug_dump.glob("*.txt"))
-    assert dumped_files
+    assert (debug_dump / "sample.pagecount.txt").exists()
+    assert (debug_dump / "sample.extracted.txt").exists()
+    assert (debug_dump / "sample.header_hits.json").exists()
