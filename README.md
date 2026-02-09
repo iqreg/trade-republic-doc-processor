@@ -16,6 +16,12 @@ pip install -r requirements.txt
 ./trimport scan --folder path/to/pdfs --db trade_republic.db
 ```
 
+To debug extraction, dump pdfplumber text per page:
+
+```bash
+./trimport scan --folder path/to/pdfs --db trade_republic.db --debug-dump dumps/
+```
+
 The scanner looks for `Umsatzübersicht` sections and extracts transactions with the following fields:
 `date`, `type`, `isin`, `instrument_name`, `quantity`, `amount_in`, `amount_out`, `balance`, `source_pdf`.
 
