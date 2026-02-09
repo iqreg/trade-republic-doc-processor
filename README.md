@@ -1,6 +1,6 @@
 # Trade Republic Doc Processor (MVP)
 
-Parse Trade Republic PDF documents into a SQLite database and export the parsed rows.
+Parse Trade Republic PDF documents into a SQLite database and export transactions.
 
 ## Setup
 
@@ -10,23 +10,24 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Parse PDFs into SQLite
+### Scan PDFs into SQLite
 
 ```bash
-python main.py parse path/to/document.pdf --db trade_republic.db
+./trimport scan --folder path/to/pdfs --db trade_republic.db
 ```
 
-This creates a `transactions` table and stores each non-empty line with detected metadata (date, ISIN, amount, currency).
+The scanner looks for `Umsatzübersicht` sections and extracts transactions with the following fields:
+`date`, `type`, `isin`, `instrument_name`, `quantity`, `amount_in`, `amount_out`, `balance`, `source_pdf`, `txn_hash`.
 
-### Export to CSV or JSON
+### Export to CSV or XLSX
 
 ```bash
-python main.py export --db trade_republic.db --format csv --output export.csv
-python main.py export --db trade_republic.db --format json --output export.json
+./trimport export --format csv --out export.csv --db trade_republic.db
+./trimport export --format xlsx --out export.xlsx --db trade_republic.db
 ```
 
-Optionally limit exported rows:
+## Tests
 
 ```bash
-python main.py export --db trade_republic.db --format csv --output export.csv --limit 100
+pytest
 ```
