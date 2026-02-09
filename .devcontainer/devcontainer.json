@@ -1,6 +1,8 @@
 {
   "name": "tr-doc-processor",
-  "image": "python:3.11-slim",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
   "postCreateCommand": "python -m pip install -U pip",
   "customizations": {
     "vscode": {
