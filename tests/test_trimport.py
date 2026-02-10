@@ -1,4 +1,3 @@
-import csv
 import sqlite3
 import sys
 from pathlib import Path
@@ -14,11 +13,8 @@ from trimport import (
     insert_transactions,
     parse_transaction_line,
     parse_transaction_lines,
-    reconstruct_rows,
     scan_folder,
-    export_rows,
     upsert_document,
-    EXPORT_COLUMNS,
 )
 
 
@@ -47,11 +43,9 @@ def test_fixture_parsing_layout():
     fixture_path = Path(__file__).parent / "fixtures" / "umsatz_sample.txt"
     text = fixture_path.read_text(encoding="utf-8")
     lines, header_found = extract_transaction_lines_from_text(text)
-    candidate_rows = reconstruct_rows(lines)
-    txns, _ = parse_transaction_lines(lines, "sample.pdf")
+    txns = parse_transaction_lines(lines, "sample.pdf")
 
     assert header_found is True
-    assert len(candidate_rows) > 0
     assert len(txns) >= 1
 
     first = txns[0]
@@ -86,7 +80,7 @@ def test_extract_lines_from_pdf(monkeypatch):
     fake_module = type("FakeModule", (), {"open": fake_open})
     monkeypatch.setitem(sys.modules, "pdfplumber", fake_module)
 
-    lines, header_found, _, _, _ = extract_transaction_lines_from_pdf("sample.pdf")
+    lines, header_found, _, _ = extract_transaction_lines_from_pdf("sample.pdf")
     assert header_found is True
     assert len(lines) > 0
     assert any("Buy trade" in line or "Sell trade" in line for line in lines)
@@ -121,7 +115,6 @@ def test_scan_writes_debug_dump_on_empty(tmp_path: Path, monkeypatch):
             page_texts=["page 1"],
             extracted_lines=[],
             header_hits={"hit": [], "miss": [1]},
-            debug_pages=[],
         )
 
     monkeypatch.setattr(trimport, "parse_pdf", fake_parse_pdf)
@@ -132,73 +125,3 @@ def test_scan_writes_debug_dump_on_empty(tmp_path: Path, monkeypatch):
     assert (debug_dump / "sample.pagecount.txt").exists()
     assert (debug_dump / "sample.extracted.txt").exists()
     assert (debug_dump / "sample.header_hits.json").exists()
-    assert (debug_dump / "sample.debug.json").exists()
-
-
-def test_export_headers_and_rows(tmp_path: Path):
-    db_path = tmp_path / "test.db"
-    init_db(str(db_path))
-    doc_id = upsert_document(str(db_path), "sample.pdf", "checksum")
-    line = "01.02.2024 Kauf Example AG DE0001234567 10 0,00 1.234,56 5.000,00"
-    txn = parse_transaction_line(line, "sample.pdf")
-    insert_transactions(str(db_path), doc_id, [txn])
-
-    csv_path = tmp_path / "export.csv"
-    xlsx_path = tmp_path / "export.xlsx"
-
-    export_rows(str(db_path), str(csv_path), "csv")
-    try:
-        openpyxl = __import__("openpyxl")
-    except ModuleNotFoundError:
-        class FakeSheet:
-            def __init__(self) -> None:
-                self.rows = []
-
-            def append(self, row):
-                self.rows.append(list(row))
-
-            def iter_rows(self, min_row=1, max_row=None, values_only=False):
-                rows = self.rows[min_row - 1 : max_row]
-                for row in rows:
-                    if values_only:
-                        yield tuple(row)
-                    else:
-                        yield [type("Cell", (), {"value": value})() for value in row]
-
-        class FakeWorkbook:
-            def __init__(self) -> None:
-                self.active = FakeSheet()
-
-            def save(self, path):
-                import json as _json
-
-                with open(path, "w", encoding="utf-8") as handle:
-                    _json.dump(self.active.rows, handle)
-
-        def fake_load_workbook(path):
-            import json as _json
-
-            workbook = FakeWorkbook()
-            with open(path, "r", encoding="utf-8") as handle:
-                workbook.active.rows = _json.load(handle)
-            return workbook
-
-        openpyxl = type(
-            "FakeOpenpyxl", (), {"Workbook": FakeWorkbook, "load_workbook": fake_load_workbook}
-        )
-        sys.modules["openpyxl"] = openpyxl
-
-    export_rows(str(db_path), str(xlsx_path), "xlsx")
-
-    expected_headers = [header for header, _ in EXPORT_COLUMNS]
-
-    csv_lines = csv_path.read_text(encoding="utf-8").splitlines()
-    assert csv_lines[0].split(",") == expected_headers
-    assert len(csv_lines) > 1
-
-    workbook = openpyxl.load_workbook(xlsx_path)
-    sheet = workbook.active
-    header_row = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
-    assert header_row == expected_headers
-    data_rows = list(sheet.iter_rows(min_row=2, values_only=True))
-    assert len(data_rows) >= 1

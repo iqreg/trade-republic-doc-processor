@@ -2,22 +2,22 @@
 import argparse
 import csv
 import hashlib
-import json
 import os
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Sequence, Tuple, Dict, Any
+from typing import List, Optional, Sequence, Tuple
+import json
 
 
-DATE_PATTERN = re.compile(r"\b(\d{1,2}\.\d{1,2}\.\d{2,4})\b")
+DATE_PATTERN = re.compile(r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b")
 DATE_WORD_PATTERN = re.compile(
     r"\b(\d{1,2})\s+([A-Za-zÄÖÜäöüß\.]+)\s+(\d{4})\b",
     re.IGNORECASE,
 )
 ISIN_PATTERN = re.compile(r"\b([A-Z]{2}[A-Z0-9]{10})\b")
-AMOUNT_WITH_CURRENCY_PATTERN = re.compile(r"(-?\d{1,3}(?:\.\d{3})*,\d{2})\s*(?:EUR|€)?")
+AMOUNT_PATTERN = re.compile(r"(-?\d{1,3}(?:\.\d{3})*,\d{2})")
 
 TYPE_MAP = {
     "kauf": "buy",
@@ -39,18 +39,6 @@ HEADER_TOKENS = [
     "ZAHLUNGSEINGANG",
     "ZAHLUNGSAUSGANG",
     "SALDO",
-]
-
-EXPORT_COLUMNS: List[Tuple[str, str]] = [
-    ("date", "date"),
-    ("type", "type"),
-    ("isin", "isin"),
-    ("instrument_name", "instrument_name"),
-    ("quantity", "quantity"),
-    ("amount_in", "amount_in"),
-    ("amount_out", "amount_out"),
-    ("balance", "balance"),
-    ("source_pdf", "source_pdf"),
 ]
 
 MONTH_MAP = {
@@ -89,8 +77,7 @@ class ParseResult:
     section_found: bool
     page_texts: List[str]
     extracted_lines: List[str]
-    header_hits: Dict[str, List[int]]
-    debug_pages: List[Dict[str, Any]]
+    header_hits: dict
 
 
 @dataclass
@@ -147,8 +134,6 @@ def parse_amount(value: str) -> float:
 
 
 def normalize_date(date_value: str) -> str:
-    if len(date_value.split(".")[-1]) == 2:
-        return datetime.strptime(date_value, "%d.%m.%y").date().isoformat()
     return datetime.strptime(date_value, "%d.%m.%Y").date().isoformat()
 
 
@@ -178,7 +163,7 @@ def extract_date(text: str) -> Tuple[Optional[str], str]:
 
 
 def extract_amounts(text: str) -> List[float]:
-    matches = AMOUNT_WITH_CURRENCY_PATTERN.findall(text)
+    matches = AMOUNT_PATTERN.findall(text)
     return [parse_amount(match) for match in matches]
 
 
@@ -224,41 +209,23 @@ def extract_transaction_lines_from_text(text: str) -> Tuple[List[str], bool]:
     return lines[header_idx + 1 :], True
 
 
-def reconstruct_rows(lines: List[str]) -> List[str]:
-    rows: List[str] = []
-    current: List[str] = []
-    for line in lines:
-        if DATE_PATTERN.search(line):
-            if current:
-                rows.append(" ".join(current))
-                current = []
-        current.append(line)
-    if current:
-        rows.append(" ".join(current))
-    return rows
-
-
-def parse_transaction_lines(
-    lines: List[str], source_pdf: str
-) -> Tuple[List[ParsedTransaction], List[Dict[str, str]]]:
+def parse_transaction_lines(lines: List[str], source_pdf: str) -> List[ParsedTransaction]:
     transactions: List[ParsedTransaction] = []
-    rejected: List[Dict[str, str]] = []
-    candidate_rows = reconstruct_rows(lines)
-    for row in candidate_rows:
-        parsed, reason = parse_transaction_row(row, source_pdf)
+    buffer: List[str] = []
+    for line in lines:
+        buffer.append(line)
+        combined = " ".join(buffer)
+        parsed = parse_transaction_line(combined, source_pdf)
         if parsed:
             transactions.append(parsed)
-        else:
-            rejected.append({"row": row, "reason": reason})
-    return transactions, rejected
+            buffer.clear()
+    return transactions
 
 
-def parse_transaction_row(
-    line: str, source_pdf: str
-) -> Tuple[Optional[ParsedTransaction], str]:
+def parse_transaction_line(line: str, source_pdf: str) -> Optional[ParsedTransaction]:
     date_iso, remainder = extract_date(line)
     if not date_iso:
-        return None, "no_date"
+        return None
 
     lower_line = remainder.lower()
     txn_type_key = None
@@ -270,7 +237,7 @@ def parse_transaction_row(
             type_match = match
             break
     if not txn_type_key or not type_match:
-        return None, "no_type"
+        return None
 
     txn_type = TYPE_MAP[txn_type_key]
     description = remainder[type_match.end() :].strip()
@@ -286,7 +253,7 @@ def parse_transaction_row(
 
     amounts = extract_amounts(remainder)
     if not amounts:
-        return None, "no_amount"
+        return None
 
     balance = None
     amount_in = None
@@ -310,7 +277,7 @@ def parse_transaction_row(
     else:
         balance = amounts[-1]
 
-    amount_start = AMOUNT_WITH_CURRENCY_PATTERN.search(remainder)
+    amount_start = AMOUNT_PATTERN.search(remainder)
     description_only = description
     if amount_start:
         description_only = remainder[: amount_start.start()].strip()
@@ -342,44 +309,33 @@ def parse_transaction_row(
         ]
     )
 
-    return (
-        ParsedTransaction(
-            date=date_iso,
-            txn_type=txn_type,
-            isin=isin_value,
-            instrument_name=instrument_name,
-            quantity=quantity,
-            amount_in=amount_in,
-            amount_out=amount_out,
-            balance=balance,
-            source_pdf=source_pdf,
-            txn_hash=txn_hash,
-        ),
-        "",
+    return ParsedTransaction(
+        date=date_iso,
+        txn_type=txn_type,
+        isin=isin_value,
+        instrument_name=instrument_name,
+        quantity=quantity,
+        amount_in=amount_in,
+        amount_out=amount_out,
+        balance=balance,
+        source_pdf=source_pdf,
+        txn_hash=txn_hash,
     )
-
-
-def parse_transaction_line(line: str, source_pdf: str) -> Optional[ParsedTransaction]:
-    parsed, _ = parse_transaction_row(line, source_pdf)
-    return parsed
 
 
 def extract_transactions_from_text(text: str, source_pdf: str) -> Tuple[List[ParsedTransaction], bool]:
     table_lines, header_found = extract_transaction_lines_from_text(text)
-    transactions, _ = parse_transaction_lines(table_lines, source_pdf)
+    transactions = parse_transaction_lines(table_lines, source_pdf)
     return transactions, header_found
 
 
-def extract_transaction_lines_from_pdf(
-    pdf_path: str,
-) -> Tuple[List[str], bool, List[str], Dict[str, List[int]], List[Dict[str, Any]]]:
+def extract_transaction_lines_from_pdf(pdf_path: str) -> Tuple[List[str], bool, List[str], dict]:
     import pdfplumber
 
     all_lines: List[str] = []
     page_texts: List[str] = []
     header_found = False
-    header_hits: Dict[str, List[int]] = {"hit": [], "miss": []}
-    debug_pages: List[Dict[str, Any]] = []
+    header_hits = {"hit": [], "miss": []}
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
@@ -387,69 +343,25 @@ def extract_transaction_lines_from_pdf(
             page_texts.append(text)
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             header_idx = find_header_idx(lines)
-            header_line = lines[header_idx] if header_idx is not None else None
             if header_idx is None:
                 header_hits["miss"].append(page_index)
-                debug_pages.append(
-                    {
-                        "page": page_index,
-                        "header_found": False,
-                        "header_line": None,
-                        "table_lines": [],
-                    }
-                )
                 continue
             header_found = True
             header_hits["hit"].append(page_index)
-            table_lines = lines[header_idx + 1 :]
-            debug_pages.append(
-                {
-                    "page": page_index,
-                    "header_found": True,
-                    "header_line": header_line,
-                    "table_lines": table_lines,
-                }
-            )
-            all_lines.extend(table_lines)
+            all_lines.extend(lines[header_idx + 1 :])
 
-    return all_lines, header_found, page_texts, header_hits, debug_pages
+    return all_lines, header_found, page_texts, header_hits
 
 
 def parse_pdf(pdf_path: str) -> ParseResult:
-    lines, header_found, page_texts, header_hits, debug_pages = extract_transaction_lines_from_pdf(
-        pdf_path
-    )
-    transactions: List[ParsedTransaction] = []
-    for page in debug_pages:
-        candidate_rows = reconstruct_rows(page.get("table_lines", []))
-        page["candidate_rows"] = candidate_rows
-        page["parsed"] = []
-        page["rejected"] = []
-        for row in candidate_rows:
-            parsed, reason = parse_transaction_row(row, pdf_path)
-            if parsed:
-                transactions.append(parsed)
-                page["parsed"].append(
-                    {
-                        "date": parsed.date,
-                        "type": parsed.txn_type,
-                        "isin": parsed.isin,
-                        "instrument_name": parsed.instrument_name,
-                        "quantity": parsed.quantity,
-                        "amount_in": parsed.amount_in,
-                        "amount_out": parsed.amount_out,
-                        "balance": parsed.balance,
-                    }
-                )
-            else:
-                page["rejected"].append({"row": row, "reason": reason})
+    lines, header_found, page_texts, header_hits = extract_transaction_lines_from_pdf(pdf_path)
+    transactions = parse_transaction_lines(lines, pdf_path)
     return ParseResult(
         transactions=transactions,
         section_found=header_found,
         page_texts=page_texts,
         extracted_lines=lines,
         header_hits=header_hits,
-        debug_pages=debug_pages,
     )
 
 
@@ -522,8 +434,7 @@ def write_debug_dump(
     pdf_path: str,
     page_texts: Sequence[str],
     extracted_lines: Sequence[str],
-    header_hits: Dict[str, List[int]],
-    debug_pages: List[Dict[str, Any]],
+    header_hits: dict,
 ) -> None:
     os.makedirs(debug_dump, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(pdf_path))[0]
@@ -538,14 +449,6 @@ def write_debug_dump(
     header_hits_path = os.path.join(debug_dump, f"{base_name}.header_hits.json")
     with open(header_hits_path, "w", encoding="utf-8") as handle:
         json.dump(header_hits, handle, ensure_ascii=False, indent=2)
-
-    debug_path = os.path.join(debug_dump, f"{base_name}.debug.json")
-    payload = {
-        "pdf": pdf_path,
-        "pages": debug_pages,
-    }
-    with open(debug_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
 def scan_folder(folder: str, db_path: str, debug_dump: Optional[str]) -> int:
@@ -566,7 +469,6 @@ def scan_folder(folder: str, db_path: str, debug_dump: Optional[str]) -> int:
                     result.page_texts,
                     result.extracted_lines,
                     result.header_hits,
-                    result.debug_pages,
                 )
             inserted_count = insert_transactions(db_path, document_id, result.transactions)
             inserted += inserted_count
@@ -587,18 +489,36 @@ def scan_folder(folder: str, db_path: str, debug_dump: Optional[str]) -> int:
 
 
 def export_rows(db_path: str, output_path: str, fmt: str) -> int:
-    headers = [header for header, _ in EXPORT_COLUMNS]
-    columns = ", ".join([column for _, column in EXPORT_COLUMNS])
     with sqlite3.connect(db_path) as conn:
         cursor = conn.execute(
             """
             SELECT
-                {columns}
+                date,
+                type,
+                isin,
+                instrument_name,
+                quantity,
+                amount_in,
+                amount_out,
+                balance,
+                source_pdf
             FROM transactions
             ORDER BY date, id
-            """.format(columns=columns),
+            """,
         )
         rows = cursor.fetchall()
+
+    headers = [
+        "date",
+        "type",
+        "isin",
+        "instrument_name",
+        "quantity",
+        "amount_in",
+        "amount_out",
+        "balance",
+        "source_pdf",
+    ]
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
