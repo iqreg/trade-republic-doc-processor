@@ -17,7 +17,6 @@ DATE_WORD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 ISIN_PATTERN = re.compile(r"\b([A-Z]{2}[A-Z0-9]{10})\b")
-AMOUNT_PATTERN = re.compile(r"(-?\d{1,3}(?:\.\d{3})*,\d{2})")
 AMOUNT_WITH_CURRENCY_PATTERN = re.compile(r"(-?\d{1,3}(?:\.\d{3})*,\d{2})\s*(?:EUR|€)?")
 
 TYPE_MAP = {
